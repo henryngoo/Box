@@ -6,113 +6,23 @@
 Improved dictionary access through dot notation with additional tools.
 """
 import string
-import sys
-import json
 import re
 import copy
 from keyword import kwlist
 import warnings
+from collections import Iterable, Mapping, Callable
 
-try:
-    from collections.abc import Iterable, Mapping, Callable
-except ImportError:
-    from collections import Iterable, Mapping, Callable
+import box
+from box.exceptions import BoxError, BoxKeyError
+from box.converters import (_to_json, _from_json, _from_toml, _to_toml,
+                            _from_yaml, _to_yaml, BOX_PARAMETERS)
 
-yaml_support = True
 
-try:
-    import yaml
-except ImportError:
-    try:
-        import ruamel.yaml as yaml
-    except ImportError:
-        yaml = None
-        yaml_support = False
+__all__ = ['Box']
 
-if sys.version_info >= (3, 0):
-    basestring = str
-else:
-    from io import open
-
-__all__ = ['Box', 'ConfigBox', 'BoxList', 'SBox',
-           'BoxError', 'BoxKeyError']
-__author__ = 'Chris Griffith'
-__version__ = '3.2.4'
-
-BOX_PARAMETERS = ('default_box', 'default_box_attr', 'conversion_box',
-                  'frozen_box', 'camel_killer_box', 'box_it_up',
-                  'box_safe_prefix', 'box_duplicates', 'ordered_box')
 
 _first_cap_re = re.compile('(.)([A-Z][a-z]+)')
 _all_cap_re = re.compile('([a-z0-9])([A-Z])')
-
-
-class BoxError(Exception):
-    """Non standard dictionary exceptions"""
-
-
-class BoxKeyError(BoxError, KeyError, AttributeError):
-    """Key does not exist"""
-
-
-# Abstract converter functions for use in any Box class
-
-
-def _to_json(obj, filename=None,
-             encoding="utf-8", errors="strict", **json_kwargs):
-    json_dump = json.dumps(obj,
-                           ensure_ascii=False, **json_kwargs)
-    if filename:
-        with open(filename, 'w', encoding=encoding, errors=errors) as f:
-            f.write(json_dump if sys.version_info >= (3, 0) else
-                    json_dump.decode("utf-8"))
-    else:
-        return json_dump
-
-
-def _from_json(json_string=None, filename=None,
-               encoding="utf-8", errors="strict", multiline=False, **kwargs):
-    if filename:
-        with open(filename, 'r', encoding=encoding, errors=errors) as f:
-            if multiline:
-                data = [json.loads(line.strip(), **kwargs) for line in f
-                        if line.strip() and not line.strip().startswith("#")]
-            else:
-                data = json.load(f, **kwargs)
-    elif json_string:
-        data = json.loads(json_string, **kwargs)
-    else:
-        raise BoxError('from_json requires a string or filename')
-    return data
-
-
-def _to_yaml(obj, filename=None, default_flow_style=False,
-             encoding="utf-8", errors="strict",
-             **yaml_kwargs):
-    if filename:
-        with open(filename, 'w',
-                  encoding=encoding, errors=errors) as f:
-            yaml.dump(obj, stream=f,
-                      default_flow_style=default_flow_style,
-                      **yaml_kwargs)
-    else:
-        return yaml.dump(obj,
-                         default_flow_style=default_flow_style,
-                         **yaml_kwargs)
-
-
-def _from_yaml(yaml_string=None, filename=None,
-               encoding="utf-8", errors="strict",
-               **kwargs):
-    if filename:
-        with open(filename, 'r',
-                  encoding=encoding, errors=errors) as f:
-            data = yaml.load(f, **kwargs)
-    elif yaml_string:
-        data = yaml.load(yaml_string, **kwargs)
-    else:
-        raise BoxError('from_yaml requires a string or filename')
-    return data
 
 
 # Helper functions
@@ -168,7 +78,7 @@ def _camel_killer(attr):
     s1 = _first_cap_re.sub(r'\1_\2', attr)
     s2 = _all_cap_re.sub(r'\1_\2', s1)
     return re.sub('_+', '_', s2.casefold() if hasattr(s2, 'casefold') else
-                  s2.lower())
+    s2.lower())
 
 
 def _recursive_tuples(iterable, box_class, recreate_tuples=False, **kwargs):
@@ -285,7 +195,7 @@ class Box(dict):
                 self._box_config['box_duplicates'] != "ignore"):
             raise BoxError('box_duplicates are only for conversion_boxes')
         if len(args) == 1:
-            if isinstance(args[0], basestring):
+            if isinstance(args[0], str):
                 raise ValueError('Cannot extrapolate Box from string')
             if isinstance(args[0], Mapping):
                 for k, v in args[0].items():
@@ -345,8 +255,7 @@ class Box(dict):
     def __dir__(self):
         allowed = string.ascii_letters + string.digits + '_'
         kill_camel = self._box_config['camel_killer_box']
-        items = set(dir(dict) + ['to_dict', 'to_json',
-                                 'from_json', 'box_it_up'])
+        items = set(self._protected_keys)
         # Only show items accessible by dot notation
         for key in self.keys():
             key = _safe_key(key)
@@ -373,10 +282,6 @@ class Box(dict):
                     items.remove(key)
                     items.add(snake_key)
 
-        if yaml_support:
-            items.add('to_yaml')
-            items.add('from_yaml')
-
         return list(items)
 
     def get(self, key, default=None):
@@ -385,8 +290,9 @@ class Box(dict):
         except KeyError:
             if isinstance(default, dict) and not isinstance(default, Box):
                 return Box(default)
-            if isinstance(default, list) and not isinstance(default, BoxList):
-                return BoxList(default)
+            if isinstance(default, list) \
+                    and not isinstance(default, box.BoxList):
+                return box.BoxList(default)
             return default
 
     def copy(self):
@@ -456,7 +362,8 @@ class Box(dict):
             value = self.__class__(value, __box_heritage=(self, item),
                                    **self.__box_config())
             self[item] = value
-        elif isinstance(value, list) and not isinstance(value, BoxList):
+        elif isinstance(value, list) \
+                and not isinstance(value, box.BoxList):
             if self._box_config['frozen_box']:
                 value = _recursive_tuples(value, self.__class__,
                                           recreate_tuples=self._box_config[
@@ -464,9 +371,9 @@ class Box(dict):
                                           __box_heritage=(self, item),
                                           **self.__box_config())
             else:
-                value = BoxList(value, __box_heritage=(self, item),
-                                box_class=self.__class__,
-                                **self.__box_config())
+                value = box.BoxList(value, __box_heritage=(self, item),
+                                         box_class=self.__class__,
+                                         **self.__box_config())
             self[item] = value
         elif (self._box_config['modify_tuples_box'] and
               isinstance(value, tuple)):
@@ -655,7 +562,7 @@ class Box(dict):
                     self[k].update(v)
                     continue
             if isinstance(v, list):
-                v = BoxList(v)
+                v = box.BoxList(v)
             try:
                 self.__setattr__(k, v)
             except (AttributeError, TypeError):
@@ -668,7 +575,7 @@ class Box(dict):
         if isinstance(default, dict):
             default = self.__class__(default)
         if isinstance(default, list):
-            default = BoxList(default)
+            default = box.BoxList(default)
         self[item] = default
         return default
 
@@ -713,398 +620,44 @@ class Box(dict):
                            'but rather a {0}'.format(type(data).__name__))
         return cls(data, **bx_args)
 
-    if yaml_support:
-        def to_yaml(self, filename=None, default_flow_style=False,
-                    encoding="utf-8", errors="strict",
-                    **yaml_kwargs):
-            """
-            Transform the Box object into a YAML string.
-
-            :param filename:  If provided will save to file
-            :param default_flow_style: False will recursively dump dicts
-            :param encoding: File encoding
-            :param errors: How to handle encoding errors
-            :param yaml_kwargs: additional arguments to pass to yaml.dump
-            :return: string of YAML or return of `yaml.dump`
-            """
-            return _to_yaml(self.to_dict(), filename=filename,
-                            default_flow_style=default_flow_style,
-                            encoding=encoding, errors=errors, **yaml_kwargs)
-
-        @classmethod
-        def from_yaml(cls, yaml_string=None, filename=None,
-                      encoding="utf-8", errors="strict",
-                      loader=yaml.SafeLoader, **kwargs):
-            """
-            Transform a yaml object string into a Box object.
-
-            :param yaml_string: string to pass to `yaml.load`
-            :param filename: filename to open and pass to `yaml.load`
-            :param encoding: File encoding
-            :param errors: How to handle encoding errors
-            :param loader: YAML Loader, defaults to SafeLoader
-            :param kwargs: parameters to pass to `Box()` or `yaml.load`
-            :return: Box object from yaml data
-            """
-            bx_args = {}
-            for arg in kwargs.copy():
-                if arg in BOX_PARAMETERS:
-                    bx_args[arg] = kwargs.pop(arg)
-
-            data = _from_yaml(yaml_string=yaml_string, filename=filename,
-                              encoding=encoding, errors=errors,
-                              Loader=loader, **kwargs)
-            if not isinstance(data, dict):
-                raise BoxError('yaml data not returned as a dictionary'
-                               'but rather a {0}'.format(type(data).__name__))
-            return cls(data, **bx_args)
-
-
-class BoxList(list):
-    """
-    Drop in replacement of list, that converts added objects to Box or BoxList
-    objects as necessary.
-    """
-
-    def __init__(self, iterable=None, box_class=Box, **box_options):
-        self.box_class = box_class
-        self.box_options = box_options
-        self.box_org_ref = self.box_org_ref = id(iterable) if iterable else 0
-        if iterable:
-            for x in iterable:
-                self.append(x)
-        if box_options.get('frozen_box'):
-            def frozen(*args, **kwargs):
-                raise BoxError('BoxList is frozen')
-
-            for method in ['append', 'extend', 'insert', 'pop',
-                           'remove', 'reverse', 'sort']:
-                self.__setattr__(method, frozen)
-
-    def __delitem__(self, key):
-        if self.box_options.get('frozen_box'):
-            raise BoxError('BoxList is frozen')
-        super(BoxList, self).__delitem__(key)
-
-    def __setitem__(self, key, value):
-        if self.box_options.get('frozen_box'):
-            raise BoxError('BoxList is frozen')
-        super(BoxList, self).__setitem__(key, value)
-
-    def append(self, p_object):
-        if isinstance(p_object, dict):
-            try:
-                p_object = self.box_class(p_object, **self.box_options)
-            except AttributeError as err:
-                if 'box_class' in self.__dict__:
-                    raise err
-        elif isinstance(p_object, list):
-            try:
-                p_object = (self if id(p_object) == self.box_org_ref else
-                            BoxList(p_object))
-            except AttributeError as err:
-                if 'box_org_ref' in self.__dict__:
-                    raise err
-        super(BoxList, self).append(p_object)
-
-    def extend(self, iterable):
-        for item in iterable:
-            self.append(item)
-
-    def insert(self, index, p_object):
-        if isinstance(p_object, dict):
-            p_object = self.box_class(p_object, **self.box_options)
-        elif isinstance(p_object, list):
-            p_object = (self if id(p_object) == self.box_org_ref else
-                        BoxList(p_object))
-        super(BoxList, self).insert(index, p_object)
-
-    def __repr__(self):
-        return "<BoxList: {0}>".format(self.to_list())
-
-    def __str__(self):
-        return str(self.to_list())
-
-    def __copy__(self):
-        return BoxList((x for x in self),
-                       self.box_class,
-                       **self.box_options)
-
-    def __deepcopy__(self, memodict=None):
-        out = self.__class__()
-        memodict = memodict or {}
-        memodict[id(self)] = out
-        for k in self:
-            out.append(copy.deepcopy(k))
-        return out
-
-    def __hash__(self):
-        if self.box_options.get('frozen_box'):
-            hashing = 98765
-            hashing ^= hash(tuple(self))
-            return hashing
-        raise TypeError("unhashable type: 'BoxList'")
-
-    def to_list(self):
-        new_list = []
-        for x in self:
-            if x is self:
-                new_list.append(new_list)
-            elif isinstance(x, Box):
-                new_list.append(x.to_dict())
-            elif isinstance(x, BoxList):
-                new_list.append(x.to_list())
-            else:
-                new_list.append(x)
-        return new_list
-
-    def to_json(self, filename=None,
+    def to_yaml(self, filename=None, default_flow_style=False,
                 encoding="utf-8", errors="strict",
-                multiline=False, **json_kwargs):
+                **yaml_kwargs):
         """
-        Transform the BoxList object into a JSON string.
+        Transform the Box object into a YAML string.
 
-        :param filename: If provided will save to file
+        :param filename:  If provided will save to file
+        :param default_flow_style: False will recursively dump dicts
         :param encoding: File encoding
         :param errors: How to handle encoding errors
-        :param multiline: Put each item in list onto it's own line
-        :param json_kwargs: additional arguments to pass to json.dump(s)
-        :return: string of JSON or return of `json.dump`
+        :param yaml_kwargs: additional arguments to pass to yaml.dump
+        :return: string of YAML or return of `yaml.dump`
         """
-        if filename and multiline:
-            lines = [_to_json(item, filename=False, encoding=encoding,
-                              errors=errors, **json_kwargs) for item in self]
-            with open(filename, 'w', encoding=encoding, errors=errors) as f:
-                f.write("\n".join(lines).decode('utf-8') if
-                        sys.version_info < (3, 0) else "\n".join(lines))
-        else:
-            return _to_json(self.to_list(), filename=filename,
-                            encoding=encoding, errors=errors, **json_kwargs)
+        return _to_yaml(self.to_dict(), filename=filename,
+                        default_flow_style=default_flow_style,
+                        encoding=encoding, errors=errors, **yaml_kwargs)
 
     @classmethod
-    def from_json(cls, json_string=None, filename=None, encoding="utf-8",
-                  errors="strict", multiline=False, **kwargs):
+    def from_yaml(cls, yaml_string=None, filename=None,
+                  encoding="utf-8", errors="strict", **kwargs):
         """
-        Transform a json object string into a BoxList object. If the incoming
-        json is a dict, you must use Box.from_json.
+        Transform a yaml object string into a Box object.
 
-        :param json_string: string to pass to `json.loads`
-        :param filename: filename to open and pass to `json.load`
+        :param yaml_string: string to pass to `yaml.load`
+        :param filename: filename to open and pass to `yaml.load`
         :param encoding: File encoding
         :param errors: How to handle encoding errors
-        :param multiline: One object per line
-        :param kwargs: parameters to pass to `Box()` or `json.loads`
-        :return: BoxList object from json data
+        :param kwargs: parameters to pass to `Box()` or `yaml.load`
+        :return: Box object from yaml data
         """
         bx_args = {}
         for arg in kwargs.copy():
             if arg in BOX_PARAMETERS:
                 bx_args[arg] = kwargs.pop(arg)
 
-        data = _from_json(json_string, filename=filename, encoding=encoding,
-                          errors=errors, multiline=multiline, **kwargs)
-
-        if not isinstance(data, list):
-            raise BoxError('json data not returned as a list, '
+        data = _from_yaml(yaml_string=yaml_string, filename=filename,
+                          encoding=encoding, errors=errors, **kwargs)
+        if not isinstance(data, dict):
+            raise BoxError('yaml data not returned as a dictionary'
                            'but rather a {0}'.format(type(data).__name__))
         return cls(data, **bx_args)
-
-    if yaml_support:
-        def to_yaml(self, filename=None, default_flow_style=False,
-                    encoding="utf-8", errors="strict",
-                    **yaml_kwargs):
-            """
-            Transform the BoxList object into a YAML string.
-
-            :param filename:  If provided will save to file
-            :param default_flow_style: False will recursively dump dicts
-            :param encoding: File encoding
-            :param errors: How to handle encoding errors
-            :param yaml_kwargs: additional arguments to pass to yaml.dump
-            :return: string of YAML or return of `yaml.dump`
-            """
-            return _to_yaml(self.to_list(), filename=filename,
-                            default_flow_style=default_flow_style,
-                            encoding=encoding, errors=errors, **yaml_kwargs)
-
-        @classmethod
-        def from_yaml(cls, yaml_string=None, filename=None,
-                      encoding="utf-8", errors="strict",
-                      loader=yaml.SafeLoader,
-                      **kwargs):
-            """
-            Transform a yaml object string into a BoxList object.
-
-            :param yaml_string: string to pass to `yaml.load`
-            :param filename: filename to open and pass to `yaml.load`
-            :param encoding: File encoding
-            :param errors: How to handle encoding errors
-            :param loader: YAML Loader, defaults to SafeLoader
-            :param kwargs: parameters to pass to `BoxList()` or `yaml.load`
-            :return: BoxList object from yaml data
-            """
-            bx_args = {}
-            for arg in kwargs.copy():
-                if arg in BOX_PARAMETERS:
-                    bx_args[arg] = kwargs.pop(arg)
-
-            data = _from_yaml(yaml_string=yaml_string, filename=filename,
-                              encoding=encoding, errors=errors,
-                              Loader=loader, **kwargs)
-            if not isinstance(data, list):
-                raise BoxError('yaml data not returned as a list'
-                               'but rather a {0}'.format(type(data).__name__))
-            return cls(data, **bx_args)
-
-    def box_it_up(self):
-        for v in self:
-            if hasattr(v, 'box_it_up') and v is not self:
-                v.box_it_up()
-
-
-class ConfigBox(Box):
-    """
-    Modified box object to add object transforms.
-
-    Allows for build in transforms like:
-
-    cns = ConfigBox(my_bool='yes', my_int='5', my_list='5,4,3,3,2')
-
-    cns.bool('my_bool') # True
-    cns.int('my_int') # 5
-    cns.list('my_list', mod=lambda x: int(x)) # [5, 4, 3, 3, 2]
-    """
-
-    _protected_keys = dir({}) + ['to_dict', 'bool', 'int', 'float',
-                                 'list', 'getboolean', 'to_json', 'to_yaml',
-                                 'getfloat', 'getint',
-                                 'from_json', 'from_yaml']
-
-    def __getattr__(self, item):
-        """Config file keys are stored in lower case, be a little more
-        loosey goosey"""
-        try:
-            return super(ConfigBox, self).__getattr__(item)
-        except AttributeError:
-            return super(ConfigBox, self).__getattr__(item.lower())
-
-    def __dir__(self):
-        return super(ConfigBox, self).__dir__() + ['bool', 'int', 'float',
-                                                   'list', 'getboolean',
-                                                   'getfloat', 'getint']
-
-    def bool(self, item, default=None):
-        """ Return value of key as a boolean
-
-        :param item: key of value to transform
-        :param default: value to return if item does not exist
-        :return: approximated bool of value
-        """
-        try:
-            item = self.__getattr__(item)
-        except AttributeError as err:
-            if default is not None:
-                return default
-            raise err
-
-        if isinstance(item, (bool, int)):
-            return bool(item)
-
-        if (isinstance(item, str) and
-                item.lower() in ('n', 'no', 'false', 'f', '0')):
-            return False
-
-        return True if item else False
-
-    def int(self, item, default=None):
-        """ Return value of key as an int
-
-        :param item: key of value to transform
-        :param default: value to return if item does not exist
-        :return: int of value
-        """
-        try:
-            item = self.__getattr__(item)
-        except AttributeError as err:
-            if default is not None:
-                return default
-            raise err
-        return int(item)
-
-    def float(self, item, default=None):
-        """ Return value of key as a float
-
-        :param item: key of value to transform
-        :param default: value to return if item does not exist
-        :return: float of value
-        """
-        try:
-            item = self.__getattr__(item)
-        except AttributeError as err:
-            if default is not None:
-                return default
-            raise err
-        return float(item)
-
-    def list(self, item, default=None, spliter=",", strip=True, mod=None):
-        """ Return value of key as a list
-
-        :param item: key of value to transform
-        :param mod: function to map against list
-        :param default: value to return if item does not exist
-        :param spliter: character to split str on
-        :param strip: clean the list with the `strip`
-        :return: list of items
-        """
-        try:
-            item = self.__getattr__(item)
-        except AttributeError as err:
-            if default is not None:
-                return default
-            raise err
-        if strip:
-            item = item.lstrip('[').rstrip(']')
-        out = [x.strip() if strip else x for x in item.split(spliter)]
-        if mod:
-            return list(map(mod, out))
-        return out
-
-    # loose configparser compatibility
-
-    def getboolean(self, item, default=None):
-        return self.bool(item, default)
-
-    def getint(self, item, default=None):
-        return self.int(item, default)
-
-    def getfloat(self, item, default=None):
-        return self.float(item, default)
-
-    def __repr__(self):
-        return '<ConfigBox: {0}>'.format(str(self.to_dict()))
-
-
-class SBox(Box):
-    """
-    ShorthandBox (SBox) allows for
-    property access of `dict` `json` and `yaml`
-    """
-    _protected_keys = dir({}) + ['to_dict', 'tree_view', 'to_json', 'to_yaml',
-                                 'json', 'yaml', 'from_yaml', 'from_json',
-                                 'dict']
-
-    @property
-    def dict(self):
-        return self.to_dict()
-
-    @property
-    def json(self):
-        return self.to_json()
-
-    if yaml_support:
-        @property
-        def yaml(self):
-            return self.to_yaml()
-
-    def __repr__(self):
-        return '<ShorthandBox: {0}>'.format(str(self.to_dict()))
